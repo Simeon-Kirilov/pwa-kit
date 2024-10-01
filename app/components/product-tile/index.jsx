@@ -5,7 +5,7 @@
  * For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
  */
 
-import React, {useRef} from 'react'
+import React, {useState, useRef} from 'react'
 import PropTypes from 'prop-types'
 import {HeartIcon, HeartSolidIcon} from '@salesforce/retail-react-app/app/components/icons'
 
@@ -13,22 +13,39 @@ import {HeartIcon, HeartSolidIcon} from '@salesforce/retail-react-app/app/compon
 import {
     AspectRatio,
     Box,
+    Button,
     Skeleton as ChakraSkeleton,
     Text,
     Stack,
     useMultiStyleConfig,
-    IconButton
+    IconButton,
+    Modal,
+    ModalOverlay,
+    ModalContent,
+    ModalHeader,
+    ModalCloseButton,
+    ModalBody,
+    ModalFooter
 } from '@salesforce/retail-react-app/app/components/shared/ui'
+
+import { useProduct, useShopperBasketsMutation } from '@salesforce/commerce-sdk-react'
+
 import DynamicImage from '@salesforce/retail-react-app/app/components/dynamic-image'
 
 // Hooks
 import {useIntl} from 'react-intl'
+import useEinstein from '@salesforce/retail-react-app/app/hooks/use-einstein'
+import {useCurrentBasket} from '@salesforce/retail-react-app/app/hooks/use-current-basket'
+import {useToast} from '@salesforce/retail-react-app/app/hooks/use-toast'
 
 // Other
 import {productUrlBuilder} from '@salesforce/retail-react-app/app/utils/url'
 import Link from '@salesforce/retail-react-app/app/components/link'
 import withRegistration from '@salesforce/retail-react-app/app/components/with-registration'
 import {useCurrency} from '@salesforce/retail-react-app/app/hooks'
+import ProductView from '@salesforce/retail-react-app/app/components/product-view'
+import {useWishList} from '@salesforce/retail-react-app/app/hooks/use-wish-list'
+
 
 const IconButtonWithRegistration = withRegistration(IconButton)
 
@@ -74,19 +91,143 @@ const ProductTile = (props) => {
     // use the `name` property.
     const localizedProductName = product.name ?? product.productName
 
+    const {data: basket} = useCurrentBasket()
+    const isBasketLoading = !basket?.basketId
+    const addItemToBasketMutation = useShopperBasketsMutation('addItemToBasket')
+
+    const showToast = useToast()
+    const showError = () => {
+        showToast({
+            title: formatMessage(API_ERROR_MESSAGE),
+            status: 'error'
+        })
+    }
+
     const {currency: activeCurrency} = useCurrency()
     const isFavouriteLoading = useRef(false)
     const styles = useMultiStyleConfig('ProductTile')
+    const einstein = useEinstein()
+    const {data: wishlist, isLoading: isWishlistLoading} = useWishList()
+
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const closeModal =  (e) => {
+        setIsModalOpen(false);
+    }
+    const openModal =  (e) => {
+        e.preventDefault();
+        setIsModalOpen(true);
+    }
+
+    const {
+        data: products,
+        isLoading: isProductLoading,
+        isError: isProductError,
+        error: productError
+    } = useProduct(
+        {
+            parameters: {
+                id: productId,
+                allImages: true
+            }
+        },
+        {
+            // When shoppers select a different variant (and the app fetches the new data),
+            // the old data is still rendered (and not the skeletons).
+            keepPreviousData: true
+        }
+    )
+
+    const handleAddToCart = async (productSelectionValues) => {
+        try {
+            const productItems = productSelectionValues.map(({variant, quantity}) => ({
+                productId: variant.productId,
+                price: variant.price,
+                quantity
+            }))
+
+            await addItemToBasketMutation.mutateAsync({
+                parameters: {basketId: basket.basketId},
+                body: productItems
+            })
+
+            einstein.sendAddToCart(productItems)
+
+            // If the items were successfully added, set the return value to be used
+            // by the add to cart modal.
+            return productSelectionValues
+        } catch (error) {
+            showError(error)
+        }
+    }
+
+    const handleAddToWishlist = (product, variant, quantity) => {
+        const isItemInWishlist = wishlist?.customerProductListItems?.find(
+            (i) => i.productId === variant?.productId || i.productId === product?.id
+        )
+
+        if (!isItemInWishlist) {
+            createCustomerProductListItem.mutate(
+                {
+                    parameters: {
+                        listId: wishlist.id,
+                        customerId
+                    },
+                    body: {
+                        // NOTE: APi does not respect quantity, it always adds 1
+                        quantity,
+                        productId: variant?.productId || product?.id,
+                        public: false,
+                        priority: 1,
+                        type: 'product'
+                    }
+                },
+                {
+                    onSuccess: () => {
+                        toast({
+                            title: formatMessage(TOAST_MESSAGE_ADDED_TO_WISHLIST, {quantity: 1}),
+                            status: 'success',
+                            action: (
+                                // it would be better if we could use <Button as={Link}>
+                                // but unfortunately the Link component is not compatible
+                                // with Chakra Toast, since the ToastManager is rendered via portal
+                                // and the toast doesn't have access to intl provider, which is a
+                                // requirement of the Link component.
+                                <Button
+                                    variant="link"
+                                    onClick={() => navigate('/account/wishlist')}
+                                >
+                                    {formatMessage(TOAST_ACTION_VIEW_WISHLIST)}
+                                </Button>
+                            )
+                        })
+                    },
+                    onError: () => {
+                        showError()
+                    }
+                }
+            )
+        } else {
+            toast({
+                title: formatMessage(TOAST_MESSAGE_ALREADY_IN_WISHLIST),
+                status: 'info',
+                action: (
+                    <Button variant="link" onClick={() => navigate('/account/wishlist')}>
+                        {formatMessage(TOAST_ACTION_VIEW_WISHLIST)}
+                    </Button>
+                )
+            })
+        }
+    }
 
     return (
         <Box {...styles.container}>
             <Link
                 data-testid="product-tile"
-                to={productUrlBuilder({id: productId}, intl.local)}
+                to={productUrlBuilder({ id: productId }, intl.local)}
                 {...styles.link}
                 {...rest}
             >
-                <Box {...styles.imageWrapper}>
+                <Box {...styles.imageWrapper} position="relative" role="group">
                     {image && (
                         <AspectRatio {...styles.image}>
                             <DynamicImage
@@ -99,6 +240,20 @@ const ProductTile = (props) => {
                             />
                         </AspectRatio>
                     )}
+
+                    {/* Button that appears on hover */}
+                    <Box
+                        position="absolute"
+                        bottom="10px"
+                        left="50%"
+                        transform="translateX(-50%)"
+                        opacity={0}
+                        _groupHover={{ opacity: 1 }}
+                    >
+                        <Button colorScheme="blue" onClick={openModal}>
+                            Quick view
+                        </Button>
+                    </Box>
                 </Box>
 
                 {/* Title */}
@@ -108,30 +263,28 @@ const ProductTile = (props) => {
                 <Text {...styles.price} data-testid="product-tile-price">
                     {hitType === 'set'
                         ? intl.formatMessage(
-                              {
-                                  id: 'product_tile.label.starting_at_price',
-                                  defaultMessage: 'Starting at {price}'
-                              },
-                              {
-                                  price: intl.formatNumber(price, {
-                                      style: 'currency',
-                                      currency: currency || activeCurrency
-                                  })
-                              }
-                          )
+                            {
+                                id: 'product_tile.label.starting_at_price',
+                                defaultMessage: 'Starting at {price}'
+                            },
+                            {
+                                price: intl.formatNumber(price, {
+                                    style: 'currency',
+                                    currency: currency || activeCurrency
+                                })
+                            }
+                        )
                         : intl.formatNumber(price, {
-                              style: 'currency',
-                              currency: currency || activeCurrency
-                          })}
+                            style: 'currency',
+                            currency: currency || activeCurrency
+                        })}
                 </Text>
             </Link>
+
             {enableFavourite && (
                 <Box
                     onClick={(e) => {
-                        // stop click event from bubbling
-                        // to avoid user from clicking the underlying
-                        // product while the favourite icon is disabled
-                        e.preventDefault()
+                        e.preventDefault();
                     }}
                 >
                     <IconButtonWithRegistration
@@ -139,32 +292,57 @@ const ProductTile = (props) => {
                         aria-label={
                             isFavourite
                                 ? intl.formatMessage(
-                                      {
-                                          id: 'product_tile.assistive_msg.remove_from_wishlist',
-                                          defaultMessage: 'Remove {product} from wishlist'
-                                      },
-                                      {product: localizedProductName}
-                                  )
+                                    {
+                                        id: 'product_tile.assistive_msg.remove_from_wishlist',
+                                        defaultMessage: 'Remove {product} from wishlist'
+                                    },
+                                    { product: localizedProductName }
+                                )
                                 : intl.formatMessage(
-                                      {
-                                          id: 'product_tile.assistive_msg.add_to_wishlist',
-                                          defaultMessage: 'Add {product} to wishlist'
-                                      },
-                                      {product: localizedProductName}
-                                  )
+                                    {
+                                        id: 'product_tile.assistive_msg.add_to_wishlist',
+                                        defaultMessage: 'Add {product} to wishlist'
+                                    },
+                                    { product: localizedProductName }
+                                )
                         }
                         icon={isFavourite ? <HeartSolidIcon /> : <HeartIcon />}
                         {...styles.favIcon}
                         onClick={async () => {
                             if (!isFavouriteLoading.current) {
-                                isFavouriteLoading.current = true
-                                await onFavouriteToggle(!isFavourite)
-                                isFavouriteLoading.current = false
+                                isFavouriteLoading.current = true;
+                                await onFavouriteToggle(!isFavourite);
+                                isFavouriteLoading.current = false;
                             }
                         }}
                     />
                 </Box>
             )}
+
+            <Modal isOpen={isModalOpen} onClose={closeModal} size="5xl">
+                <ModalOverlay />
+                <ModalContent>
+                    <ModalHeader>{localizedProductName}</ModalHeader>
+                    <ModalCloseButton onClick={closeModal}/>
+                    <ModalBody>
+                        <ProductView product={products}
+                        addToCart={(variant, quantity) =>
+                            handleAddToCart([{product, variant, quantity}])
+                        }
+                        addToWishlist={handleAddToWishlist}
+                        isProductLoading={isProductLoading}
+                        isBasketLoading={isBasketLoading}
+                        isWishlistLoading={isWishlistLoading}
+                        />
+                    </ModalBody>
+                    <ModalFooter>
+                        <Button colorScheme="blue" onClick={closeModal}>
+                            Close
+                        </Button>
+                    </ModalFooter>
+                </ModalContent>
+            </Modal>
+
         </Box>
     )
 }
