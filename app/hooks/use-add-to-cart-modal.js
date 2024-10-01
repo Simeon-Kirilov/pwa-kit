@@ -110,7 +110,7 @@ export const AddToCartModal = () => {
                             borderStyle="solid"
                         >
                             {itemsAdded.map(({product, variant, quantity}, index) => {
-                                const image = findImageGroupBy(product.imageGroups, {
+                                const image = product.image || findImageGroupBy(product.imageGroups, {
                                     viewType: 'small',
                                     selectedVariationAttributes: variant.variationValues
                                 })?.images?.[0]
